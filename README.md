@@ -1,6 +1,8 @@
 # zcode-docker-webui
 
-Run [ZCode](https://zcode.z.ai), Z.ai's AI coding agent, in a container on your Mac with [OrbStack](https://orbstack.dev). ZCode's Linux build runs in a browser tab at **https://zcode.orb.local**, works on folders from your Mac at their real paths, and signs in with your Z.ai coding plan. The same login also powers an **OpenAI-compatible API**, so scripts and tools on your Mac can use your plan too.
+**Use ZCode, Z.ai's AI coding agent, from a browser tab without installing it on your Mac, and reuse your Z.ai coding plan from your own scripts through an OpenAI-compatible API.** The agent runs in an isolated container and only sees the folders you give it.
+
+It runs [ZCode](https://zcode.z.ai) in a container on your Mac with [OrbStack](https://orbstack.dev). ZCode's Linux build runs in a browser tab at **https://zcode.orb.local**, works on folders from your Mac at their real paths, and signs in with your Z.ai coding plan. The same login also powers an **OpenAI-compatible API**, so scripts and tools on your Mac can use your plan too.
 
 > [!WARNING]
 > **Unofficial and unsupported in every way.** This project is not affiliated with, endorsed by or supported by Z.ai, ZCode, OrbStack or Selkies. It relies on undocumented internals of ZCode, including its bundled CLI and credential store, which any update can break without notice. Using your Z.ai plan through it, especially through the API, may fall outside Z.ai's terms. Check them yourself. No help, fixes or compatibility are promised. Use it entirely at your own risk.
@@ -34,9 +36,9 @@ Not on OrbStack? See [Running without OrbStack](#running-without-orbstack-linux-
 
 **2. Get this repo and start ZCode on a project**
 
-Clone or download this repository, then from its folder run:
-
 ```sh
+git clone https://github.com/ban-red/zcode-docker-webui.git
+cd zcode-docker-webui
 ./run.sh ~/code/myapp
 ```
 
