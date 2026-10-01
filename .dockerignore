@@ -2,3 +2,4 @@
 .env
 compose.override.yaml
 *.md
+docs

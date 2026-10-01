@@ -1,4 +1,22 @@
+<div align="center">
+
 # zcode-docker-webui
+
+**ZCode in a browser tab, in a container, on your Mac.**
+
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Runs on OrbStack](https://img.shields.io/badge/runs%20on-OrbStack-5b6ee1.svg)](https://orbstack.dev)
+[![Unofficial](https://img.shields.io/badge/status-unofficial-lightgrey.svg)](SECURITY.md)
+
+[Quick start](#quick-start) · [API](#openai-compatible-api) · [Settings](#settings) · [Performance](PERF.md) · [Security](SECURITY.md)
+
+<a href="docs/screenshot.png">
+  <img src="docs/screenshot.png" alt="ZCode running in a browser tab at zcode.orb.local" width="800">
+</a>
+
+<sub>ZCode running at <code>zcode.orb.local</code>. Click to enlarge.</sub>
+
+</div>
 
 **Use ZCode, Z.ai's AI coding agent, from a browser tab without installing it on your Mac, and reuse your Z.ai coding plan from your own scripts through an OpenAI-compatible API.** The agent runs in an isolated container and only sees the folders you give it.
 
