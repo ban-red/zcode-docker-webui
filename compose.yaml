@@ -1,0 +1,76 @@
+# ZCode on OrbStack.
+#   docker compose up -d            -> browser mode, open https://zcode.orb.local
+#   docker compose up -d zcode-x11  -> XQuartz mode (see run.sh --x11)
+# Both use container name "zcode", so only one runs at a time.
+
+x-build-args: &build-args
+  ZCODE_VERSION: ${ZCODE_VERSION:-3.14.4}
+  NODE_VERSION: ${NODE_VERSION:-24}
+
+x-common: &common
+  shm_size: 2gb   # Chromium uses /dev/shm for IPC; Docker's 64MB default causes renderer crashes
+  cpus: ${ZCODE_CPUS:-4}   # hard ceiling; the stream drops frames instead of eating the Mac
+
+# Every ZCODE_* knob below can be set in .env (see .env.example); ./run.sh applies changes.
+# Project folders are mounted by compose.override.yaml, which ./run.sh <dir>... generates.
+
+services:
+  zcode:
+    <<: *common
+    build: { context: ., target: web, args: *build-args }
+    image: zcode:web
+    container_name: zcode
+    volumes:
+      - zcode-config:/config
+    environment:
+      ZCODE_CDP: ${ZCODE_CDP:-0}
+      ZCODE_FLAGS: ${ZCODE_FLAGS:-}
+      ZCODE_REDUCED_MOTION: ${ZCODE_REDUCED_MOTION:-1}
+      PUID: ${PUID:-1000}
+      PGID: ${PGID:-1000}
+      TZ: ${TZ:-Etc/UTC}
+      # Stream tuning (PERF.md). These set the defaults; the Selkies sidebar can still change them live.
+      SELKIES_FRAMERATE: ${ZCODE_FPS:-30}
+      SELKIES_ENCODER: ${ZCODE_ENCODER:-jpeg,h264enc-striped,h264enc}
+      SELKIES_JPEG_QUALITY: ${ZCODE_JPEG_QUALITY:-70}
+      SELKIES_VIDEO_STREAMING_MODE: ${ZCODE_TURBO:-false}
+      SELKIES_USE_CSS_SCALING: ${ZCODE_SCALE_1X:-true}
+      SELKIES_MANUAL_WIDTH: ${ZCODE_WIDTH:-0}
+      SELKIES_MANUAL_HEIGHT: ${ZCODE_HEIGHT:-0}
+      SELKIES_AUDIO_ENABLED: ${ZCODE_AUDIO:-false}
+      # OpenAI-compatible API at https://zcode.orb.local/api/v1 (README "API").
+      ZCODE_API: ${ZCODE_API:-1}
+      ZCODE_API_KEY: ${ZCODE_API_KEY:-}
+      ZCODE_API_ORIGINS: ${ZCODE_API_ORIGINS:-}
+      ZCODE_API_AGENT: ${ZCODE_API_AGENT:-0}
+      ZCODE_API_MODEL: ${ZCODE_API_MODEL:-GLM-5.3-Flash}
+      ZCODE_API_REASONING: ${ZCODE_API_REASONING:-high}
+      ZCODE_API_PROVIDER: ${ZCODE_API_PROVIDER:-account:zai-individual-coding-plan}
+      ZCODE_API_CONCURRENCY: ${ZCODE_API_CONCURRENCY:-2}
+      ZCODE_API_TIMEOUT: ${ZCODE_API_TIMEOUT:-600}
+    labels:
+      # No published ports: OrbStack routes the domain straight to the container, with a trusted TLS cert.
+      dev.orbstack.domains: zcode.orb.local
+      dev.orbstack.http-port: "3000"
+    restart: unless-stopped
+
+  zcode-x11:
+    <<: *common
+    profiles: [x11]
+    init: true      # tini reaps Chromium's zombies; not for the web image, whose s6-overlay must be PID 1
+    build: { context: ., target: x11, args: *build-args }
+    image: zcode:x11
+    container_name: zcode
+    volumes:
+      - zcode-x11-config:/config
+    environment:
+      ZCODE_CDP: ${ZCODE_CDP:-0}
+      ZCODE_FLAGS: ${ZCODE_FLAGS:-}
+      ZCODE_REDUCED_MOTION: ${ZCODE_REDUCED_MOTION:-1}
+      DISPLAY: host.docker.internal:0
+    labels:
+      dev.orbstack.domains: zcode.orb.local
+
+volumes:
+  zcode-config:
+  zcode-x11-config:

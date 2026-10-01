@@ -1,0 +1,12 @@
+# Plain Docker (Docker Engine on Linux, Docker Desktop, ...): there is no *.orb.local routing, so
+# publish the desktop + API and the DevTools proxy on this machine's LOOPBACK only.
+# ./run.sh adds this file by itself when OrbStack isn't the active Docker (ZCODE_RUNTIME=docker forces it).
+#
+# Keep the 127.0.0.1: prefix. A bare "3000:3000" listens on every interface - on Linux that also
+# bypasses ufw - and would put an unauthenticated desktop that drives a shell-capable agent, plus an
+# unkeyed API, on your network. See SECURITY.md.
+services:
+  zcode:
+    ports:
+      - "127.0.0.1:${ZCODE_PORT:-3000}:3000"          # desktop at http://localhost:3000, API at /api/v1
+      - "127.0.0.1:${ZCODE_CDP_PORT:-9223}:9223"      # DevTools proxy; only answers when ZCODE_CDP=1

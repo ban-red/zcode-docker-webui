@@ -1,0 +1,5 @@
+#!/bin/sh
+# Expose ZCode's loopback-only DevTools port (9222) on all interfaces as 9223.
+# With OrbStack this is reachable from the Mac at http://zcode.orb.local:9223 without publishing ports.
+command -v socat >/dev/null || { echo "zcode-cdp-proxy: socat not installed" >&2; exit 1; }
+exec socat TCP-LISTEN:9223,fork,reuseaddr TCP:127.0.0.1:9222 2>/dev/null

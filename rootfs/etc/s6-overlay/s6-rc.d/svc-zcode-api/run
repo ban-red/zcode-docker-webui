@@ -1,0 +1,6 @@
+#!/usr/bin/with-contenv sh
+# OpenAI-compatible API (zcode-api) on 127.0.0.1:8091, served by nginx at /api/v1/.
+# ZCODE_API=0 parks the service instead of exiting, so s6 doesn't restart it in a loop.
+[ "${ZCODE_API:-1}" = 1 ] || exec sleep infinity
+cd /config || exit 1
+exec s6-setuidgid abc env HOME=/config node /usr/local/bin/zcode-api

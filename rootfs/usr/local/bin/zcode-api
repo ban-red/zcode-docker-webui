@@ -1,0 +1,429 @@
+#!/usr/bin/env node
+// OpenAI-compatible API in front of ZCode's headless CLI (zcode-cli -p).
+// Served at https://zcode.orb.local/api/v1 through nginx (rootfs/etc/nginx/zcode-api.conf).
+//
+//   GET  /api/v1/models
+//   POST /api/v1/chat/completions   messages[] -> one CLI turn; "stream": true for SSE
+//   POST /api/v1/completions        legacy "prompt" form of the same
+//   GET  /api/v1/health
+//
+// Each request runs one `zcode-cli -p ... --output-format stream-json` and maps its NDJSON
+// events (model.streaming text/reasoning deltas, the final "result") onto OpenAI's shapes.
+// By default it is a plain chat endpoint: every built-in tool is removed, build mode (nothing to
+// approve without tools), and an empty scratch working directory. ZCODE_API_AGENT=1 lets
+// callers opt into the full agent.
+'use strict';
+const http = require('node:http');
+const crypto = require('node:crypto');
+const fs = require('node:fs');
+const path = require('node:path');
+const { spawn } = require('node:child_process');
+
+const env = process.env;
+const PORT = 8091; // fixed: nginx proxies /api/v1/ here
+const HOME = env.HOME || '/config';
+const API_KEY = env.ZCODE_API_KEY || '';
+const ORIGINS = (env.ZCODE_API_ORIGINS || '').split(/[\s,]+/).filter(Boolean);
+const AGENT = env.ZCODE_API_AGENT === '1';
+const MAX_JOBS = Math.max(1, Number(env.ZCODE_API_CONCURRENCY) || 2);
+const TIMEOUT_MS = 1000 * (Number(env.ZCODE_API_TIMEOUT) || 600);
+const PROVIDER = env.ZCODE_API_PROVIDER || 'account:zai-individual-coding-plan';
+const DEFAULT_MODEL = env.ZCODE_API_MODEL || 'GLM-5.3-Flash';
+// ZCode's reasoning levels. Without one, ZCode picks the model's highest ("max"), so a default is always sent.
+const REASONING_LEVELS = ['low', 'medium', 'high', 'xhigh', 'max'];
+const DEFAULT_REASONING = env.ZCODE_API_REASONING || 'high';
+// ZCode's built-in tool names (its ZCODE_KNOWN_TOOL_NAMES); plugin MCP tools add to these.
+const CHAT_DISALLOWED_TOOLS = env.ZCODE_API_DISALLOWED_TOOLS ||
+    'Read Write Edit ApplyPatch Bash Glob Grep WebFetch WebSearch web_search TodoRead TodoWrite ' +
+    'GoalRead ReadSessionContext AskUserQuestion SendMessage RespondToCoordinator TaskOutput TaskStop ' +
+    'js js_reset js_add_node_module_dir mcp__node_repl__js mcp__node_repl__js_reset ' +
+    'mcp__node_repl__js_add_node_module_dir Agent Task Skill CreateWorkflow AmendWorkflow ' +
+    // Plan/workflow tools the model still saw without the above (EvalWorkflowSnippet runs code).
+    'EnterPlanMode ExitPlanMode SaveWorkflow EvalWorkflowSnippet ListWorkflowRuns GetWorkflowRun ' +
+    'ResumeWorkflowRun ResolveWorkflowQuestion ListSavedWorkflows ListModels';
+const MODES = new Set(['build', 'edit', 'plan', 'yolo']);
+// Linux caps a single argv string at 128 KiB (MAX_ARG_STRLEN); the CLI takes the prompt as one.
+const MAX_PROMPT_BYTES = 120 * 1024;
+
+const CLI = '/usr/local/bin/zcode-cli';
+const CLI_SYNC = '/usr/local/bin/zcode-cli-sync';
+const BUILTIN_PROVIDERS = '/opt/ZCode/resources/config/provider/zcode-builtin.json';
+const PERSONAL_PROVIDERS = path.join(HOME, '.zcode/v2/provider_config.json');
+const STATE = path.join(HOME, '.zcode-api');
+const WORKSPACE = path.join(STATE, 'workspace'); // cwd for chat-mode runs, so they stay out of real projects
+fs.mkdirSync(WORKSPACE, { recursive: true });
+
+// --- models ---
+
+function knownModels() {
+    try {
+        const rules = JSON.parse(fs.readFileSync(BUILTIN_PROVIDERS, 'utf8')).config.providerConfigRules.providerRules;
+        const ids = rules.find(r => r.providerId === PROVIDER)?.config?.builtinModelIds;
+        if (ids?.length) return ids;
+    } catch {}
+    return [DEFAULT_MODEL];
+}
+const MODELS = knownModels();
+
+// "GLM-5.3" (the default provider) or "<providerId>/<modelId>"; the case of known ids is normalised.
+function parseModel(name) {
+    name = String(name || DEFAULT_MODEL);
+    const slash = name.indexOf('/');
+    if (slash > 0) return { providerId: name.slice(0, slash), modelId: name.slice(slash + 1) };
+    const known = MODELS.find(m => m.toLowerCase() === name.toLowerCase());
+    return { providerId: PROVIDER, modelId: known || name };
+}
+
+// The CLI has no --model flag: it uses the personal provider config's defaultModelSelection.
+// Each model gets a copy of that config with the selection swapped, passed via
+// ZCODE_PERSONAL_PROVIDER_CONFIG_FILE, so the desktop's own default is never touched.
+function providerConfigFor(selection) {
+    let doc;
+    try { doc = JSON.parse(fs.readFileSync(PERSONAL_PROVIDERS, 'utf8')); } catch {}
+    if (!doc?.config) doc = { schemaVersion: 1, config: { providerConfigRules: { providerRules: [] },
+        modelConfigRules: { providerModelRules: [], manualProviderModelRules: [] } } };
+    doc.config.defaultModelSelection = selection;
+    const body = JSON.stringify(doc, null, 2);
+    const file = path.join(STATE, `provider-${crypto.createHash('sha1').update(body).digest('hex').slice(0, 12)}.json`);
+    if (!fs.existsSync(file)) {
+        fs.writeFileSync(`${file}.tmp`, body, { mode: 0o600 });
+        fs.renameSync(`${file}.tmp`, file);
+    }
+    return file;
+}
+
+// --- request -> prompt ---
+
+function contentText(content, job) {
+    if (typeof content === 'string') return content;
+    if (!Array.isArray(content)) return content == null ? '' : JSON.stringify(content);
+    return content.map(part => {
+        if (part?.type === 'text' || part?.type === 'input_text') return part.text ?? '';
+        if (part?.type === 'image_url') {
+            const url = typeof part.image_url === 'string' ? part.image_url : part.image_url?.url;
+            const file = saveDataUrl(url, job);
+            return file ? `[image attached: ${path.basename(file)}]` : `[image: ${url}]`;
+        }
+        return '';
+    }).filter(Boolean).join('\n');
+}
+
+const IMAGE_EXT = { 'image/png': '.png', 'image/jpeg': '.jpg', 'image/gif': '.gif', 'image/webp': '.webp' };
+function saveDataUrl(url, job) {
+    const m = /^data:(image\/[a-z]+);base64,(.*)$/s.exec(url || '');
+    if (!m || !IMAGE_EXT[m[1]]) return null;
+    job.dir ??= fs.mkdtempSync(path.join(STATE, 'job-'));
+    const file = path.join(job.dir, `image-${job.attachments.length + 1}${IMAGE_EXT[m[1]]}`);
+    fs.writeFileSync(file, Buffer.from(m[2], 'base64'));
+    job.attachments.push(file);
+    return file;
+}
+
+function speaker(msg) {
+    const role = msg.role === 'tool' || msg.role === 'function' ? `Tool result${msg.name ? ` (${msg.name})` : ''}` : msg.role;
+    return role.charAt(0).toUpperCase() + role.slice(1);
+}
+
+function messageText(msg, job) {
+    let text = contentText(msg.content, job);
+    for (const call of msg.tool_calls || []) {
+        text += `\n[called ${call.function?.name}(${call.function?.arguments ?? ''})]`;
+    }
+    return text.trim();
+}
+
+// The CLI takes one prompt per turn, so an OpenAI transcript is flattened into one. With
+// zcode.session (resuming a CLI session) only the new trailing user turn(s) are sent.
+function buildPrompt(messages, job, resuming) {
+    if (!Array.isArray(messages) || !messages.length) throw httpError(400, '`messages` must be a non-empty array');
+    const system = messages.filter(m => m.role === 'system' || m.role === 'developer');
+    let turns = messages.filter(m => !system.includes(m));
+    if (resuming) {
+        const lastAssistant = turns.findLastIndex(m => m.role === 'assistant');
+        turns = turns.slice(lastAssistant + 1);
+    }
+    if (!turns.length) throw httpError(400, '`messages` has no user turn to answer');
+    const last = turns.at(-1);
+    const history = turns.slice(0, -1);
+    const lastText = messageText(last, job);
+    if (!system.length && !history.length) return lastText;
+
+    const out = [];
+    if (system.length) out.push('<instructions>\n' + system.map(m => messageText(m, job)).join('\n\n') + '\n</instructions>');
+    if (history.length) out.push('<conversation>\n' + history.map(m => `${speaker(m)}: ${messageText(m, job)}`).join('\n\n') + '\n</conversation>');
+    out.push(history.length ? `Continue the conversation. Reply to this ${last.role} message:\n\n${lastText}` : lastText);
+    return out.join('\n\n');
+}
+
+// --- running the CLI ---
+
+// The CLI reuses the desktop's login once zcode-cli-sync has linked it (see that script). Done
+// lazily before the first run, and again after a run reports no login (desktop re-login etc.).
+let loginLinked = false;
+function linkDesktopLogin() {
+    return new Promise(resolve => {
+        const child = spawn(CLI_SYNC, [], { env: { ...env, HOME }, stdio: ['ignore', 'inherit', 'inherit'] });
+        child.on('error', () => resolve(false));
+        child.on('close', code => resolve(code === 0));
+    });
+}
+
+let running = 0;
+const waiting = [];
+async function slot() {
+    if (running < MAX_JOBS) { running++; return; }
+    await new Promise(resolve => waiting.push(resolve));
+}
+function release() {
+    const next = waiting.shift();
+    if (next) next(); else running--;
+}
+
+// Runs one CLI turn. onDelta(kind, text) gets streamed text/reasoning; resolves with the
+// final result event, or rejects with the turn's error.
+async function runTurn(req, job, onDelta, signal) {
+    const z = req.zcode && typeof req.zcode === 'object' ? req.zcode : {};
+    if (!AGENT && (z.cwd || z.mode || z.tools)) throw httpError(403, 'zcode.cwd/mode/tools need ZCODE_API_AGENT=1 on the container');
+    // Chat runs have no tools, so build mode has nothing to approve; plan mode would inject its
+    // plan-workflow instructions, which the model then tries to follow.
+    const mode = z.mode || 'build';
+    if (!MODES.has(mode)) throw httpError(400, `zcode.mode must be one of ${[...MODES].join(', ')}`);
+    const cwd = z.cwd || WORKSPACE;
+    if (!fs.statSync(cwd, { throwIfNoEntry: false })?.isDirectory()) throw httpError(400, `zcode.cwd is not a directory in the container: ${cwd}`);
+    if (z.session && !/^sess_[\w-]+$/.test(z.session)) throw httpError(400, 'zcode.session must look like sess_...');
+
+    const prompt = req.prompt ?? buildPrompt(req.messages, job, Boolean(z.session));
+    if (Buffer.byteLength(prompt) > MAX_PROMPT_BYTES) throw httpError(413, `prompt is over ${MAX_PROMPT_BYTES / 1024} KiB; use zcode.session to continue a conversation instead of resending it`);
+
+    const { providerId, modelId } = parseModel(req.model);
+    // ZCode silently falls back to its default for unknown models; fail like OpenAI does instead.
+    if (providerId === PROVIDER && !MODELS.includes(modelId)) throw httpError(404, `model ${modelId} not found; available: ${MODELS.join(', ')} (or <providerId>/<modelId>)`, 'model_not_found');
+    const selection = { providerId, modelId };
+    const reasoningLevel = req.reasoning_effort ?? DEFAULT_REASONING;
+    if (!REASONING_LEVELS.includes(reasoningLevel)) throw httpError(400, `reasoning_effort must be one of ${REASONING_LEVELS.join(', ')}`);
+    selection.options = { reasoningLevel };
+
+    const args = ['-p', prompt, '--output-format', 'stream-json', '--mode', mode, '--cwd', cwd, '--no-color'];
+    if (!(AGENT && z.tools)) args.push('--disallowed-tools', CHAT_DISALLOWED_TOOLS);
+    if (z.session) args.push('--resume', z.session);
+    for (const file of job.attachments) args.push('--attach', file);
+
+    if (!loginLinked) loginLinked = await linkDesktopLogin();
+    await slot();
+    try {
+        if (signal.aborted) throw httpError(499, 'client closed the request');
+        return await new Promise((resolve, reject) => {
+            const child = spawn(CLI, args, {
+                cwd,
+                env: { ...env, HOME, ZCODE_PERSONAL_PROVIDER_CONFIG_FILE: providerConfigFor(selection) },
+                stdio: ['ignore', 'pipe', 'pipe'],
+            });
+            let result, failure, stderr = '', buf = '';
+            const kill = () => child.kill('SIGTERM');
+            const timer = setTimeout(() => { failure ??= httpError(504, `ZCode did not finish within ${TIMEOUT_MS / 1000}s`); kill(); }, TIMEOUT_MS);
+            signal.addEventListener('abort', kill, { once: true });
+
+            child.stdout.setEncoding('utf8').on('data', chunk => {
+                buf += chunk;
+                let nl;
+                while ((nl = buf.indexOf('\n')) >= 0) {
+                    const line = buf.slice(0, nl).trim();
+                    buf = buf.slice(nl + 1);
+                    if (!line) continue;
+                    let ev;
+                    try { ev = JSON.parse(line); } catch { continue; }
+                    if (ev.type === 'model.streaming') {
+                        const kind = ev.payload?.kind;
+                        if ((kind === 'text_delta' || kind === 'reasoning_delta') && ev.payload.delta) onDelta(kind, ev.payload.delta);
+                    } else if (ev.type === 'turn.failed') {
+                        const e = ev.payload?.error || {};
+                        let message = e.underlyingErrorMessage || e.message || 'ZCode turn failed';
+                        if (/select a model/i.test(message)) {
+                            loginLinked = false;
+                            message += ` (no login for ${providerId}: log in to the ZCode desktop app and send it one message, or run ./login.sh --cli on the Mac)`;
+                        }
+                        failure ??= httpError(e.code === 'CONFIGURATION_ERROR' ? 503 : 502, message, e.code);
+                    } else if (ev.type === 'result') {
+                        result = ev;
+                    }
+                }
+            });
+            child.stderr.setEncoding('utf8').on('data', chunk => { stderr = (stderr + chunk).slice(-4000); });
+            child.on('error', err => { failure ??= httpError(500, `could not start zcode-cli: ${err.message}`); });
+            child.on('close', code => {
+                clearTimeout(timer);
+                signal.removeEventListener('abort', kill);
+                if (result && code === 0) return resolve(result);
+                if (signal.aborted) return reject(httpError(499, 'client closed the request'));
+                reject(failure || httpError(502, stderr.trim().split('\n').at(-1) || `zcode-cli exited with ${code}`));
+            });
+        });
+    } finally {
+        release();
+    }
+}
+
+// --- OpenAI shapes ---
+
+function httpError(status, message, code) {
+    return Object.assign(new Error(message), { status, code });
+}
+
+function usageOf(result) {
+    const u = result?.usage || {};
+    const prompt = (u.inputTokens ?? u.input ?? 0) + (u.cacheReadTokens ?? 0) + (u.cacheWriteTokens ?? 0);
+    const completion = u.outputTokens ?? u.output ?? 0;
+    return {
+        prompt_tokens: prompt,
+        completion_tokens: completion,
+        total_tokens: prompt + completion,
+        ...(u.cacheReadTokens ? { prompt_tokens_details: { cached_tokens: u.cacheReadTokens } } : {}),
+    };
+}
+
+function zcodeInfo(result) {
+    return { session: result.sessionId, trace_id: result.traceId };
+}
+
+function modelName(req) {
+    const { providerId, modelId } = parseModel(req.model);
+    return providerId === PROVIDER ? modelId : `${providerId}/${modelId}`;
+}
+
+async function handleCompletion(req, res, legacy) {
+    const id = `${legacy ? 'cmpl' : 'chatcmpl'}-${crypto.randomUUID()}`;
+    const created = Math.floor(Date.now() / 1000);
+    const model = modelName(req);
+    const object = legacy ? 'text_completion' : 'chat.completion';
+    const job = { attachments: [], dir: null };
+    const ac = new AbortController();
+    res.on('close', () => { if (!res.writableFinished) ac.abort(); });
+    if (legacy && typeof req.prompt !== 'string') {
+        if (Array.isArray(req.prompt) && req.prompt.length === 1) req.prompt = String(req.prompt[0]);
+        else throw httpError(400, '`prompt` must be a string');
+    }
+
+    try {
+        if (!req.stream) {
+            let reasoning = '';
+            const result = await runTurn(req, job, (kind, text) => { if (kind === 'reasoning_delta') reasoning += text; }, ac.signal);
+            const text = result.response ?? '';
+            return sendJson(res, 200, {
+                id, object, created, model,
+                choices: [legacy
+                    ? { index: 0, text, finish_reason: 'stop', logprobs: null }
+                    : { index: 0, message: { role: 'assistant', content: text, ...(reasoning ? { reasoning_content: reasoning } : {}) }, finish_reason: 'stop' }],
+                usage: usageOf(result),
+                zcode: zcodeInfo(result),
+            });
+        }
+
+        // SSE. Headers go out at the first event (or the error), so failures before any
+        // output still come back as a normal JSON error with a status code.
+        const chunk = (delta, finish = null, extra = {}) => ({
+            id, object: legacy ? 'text_completion' : 'chat.completion.chunk', created, model,
+            choices: [legacy ? { index: 0, text: delta.content ?? '', finish_reason: finish, logprobs: null }
+                             : { index: 0, delta, finish_reason: finish }],
+            ...extra,
+        });
+        const send = obj => {
+            if (!res.headersSent) {
+                res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no' });
+                if (!legacy) res.write(`data: ${JSON.stringify(chunk({ role: 'assistant', content: '' }))}\n\n`);
+            }
+            res.write(`data: ${JSON.stringify(obj)}\n\n`);
+        };
+        let result;
+        try {
+            result = await runTurn(req, job, (kind, text) => {
+                if (kind === 'text_delta') send(chunk({ content: text }));
+                else if (!legacy) send(chunk({ reasoning_content: text }));
+            }, ac.signal);
+        } catch (err) {
+            if (!res.headersSent || res.destroyed) throw err;
+            res.write(`data: ${JSON.stringify({ error: errorBody(err).error })}\n\n`);
+            return res.end('data: [DONE]\n\n');
+        }
+        const usage = req.stream_options?.include_usage ? { usage: usageOf(result) } : {};
+        send(chunk({}, 'stop', { ...usage, zcode: zcodeInfo(result) }));
+        res.end('data: [DONE]\n\n');
+    } finally {
+        if (job.dir) fs.rm(job.dir, { recursive: true, force: true }, () => {});
+    }
+}
+
+// --- HTTP ---
+
+function errorBody(err) {
+    const status = err.status || 500;
+    return { error: { message: err.message, type: status < 500 ? 'invalid_request_error' : 'server_error', code: err.code || null } };
+}
+
+function sendJson(res, status, body) {
+    if (res.headersSent) return res.end();
+    res.writeHead(status, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify(body));
+}
+
+function readJson(req) {
+    return new Promise((resolve, reject) => {
+        let body = '';
+        req.setEncoding('utf8').on('data', c => { body += c; }).on('end', () => {
+            try { resolve(body ? JSON.parse(body) : {}); } catch { reject(httpError(400, 'request body is not valid JSON')); }
+        }).on('error', reject);
+    });
+}
+
+function authorize(req, res) {
+    // Browsers attach Origin to cross-site requests; pages you visit must not be able to spend
+    // your plan (or drive the agent) through this endpoint. Non-browser clients send none.
+    const origin = req.headers.origin;
+    if (origin) {
+        if (!ORIGINS.includes(origin) && !ORIGINS.includes('*')) throw httpError(403, `Origin ${origin} is not allowed (ZCODE_API_ORIGINS)`);
+        res.setHeader('Access-Control-Allow-Origin', origin);
+        res.setHeader('Vary', 'Origin');
+    }
+    if (API_KEY) {
+        const given = /^Bearer\s+(.+)$/i.exec(req.headers.authorization || '')?.[1] || '';
+        const a = Buffer.from(given), b = Buffer.from(API_KEY);
+        if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) throw httpError(401, 'missing or wrong API key (Authorization: Bearer $ZCODE_API_KEY)');
+    }
+}
+
+const server = http.createServer(async (req, res) => {
+    const url = new URL(req.url, 'http://x');
+    const route = url.pathname.replace(/^\/api/, '').replace(/\/+$/, '');
+    try {
+        if (req.method === 'OPTIONS') {
+            authorize(req, res);
+            res.writeHead(204, { 'Access-Control-Allow-Methods': 'GET, POST, OPTIONS', 'Access-Control-Allow-Headers': 'Authorization, Content-Type', 'Access-Control-Max-Age': '600' });
+            return res.end();
+        }
+        authorize(req, res);
+        if (req.method === 'GET' && route === '/v1/health') {
+            return sendJson(res, 200, { ok: true, running, queued: waiting.length, agent: AGENT });
+        }
+        if (req.method === 'GET' && route === '/v1/models') {
+            return sendJson(res, 200, { object: 'list', data: MODELS.map(id => ({ id, object: 'model', created: 0, owned_by: 'zai' })) });
+        }
+        if (req.method === 'GET' && route.startsWith('/v1/models/')) {
+            const id = decodeURIComponent(route.slice('/v1/models/'.length));
+            const { providerId, modelId } = parseModel(id);
+            if (providerId === PROVIDER && !MODELS.includes(modelId)) throw httpError(404, `model ${modelId} not found`, 'model_not_found');
+            return sendJson(res, 200, { id: modelName({ model: id }), object: 'model', created: 0, owned_by: 'zai' });
+        }
+        if (req.method === 'POST' && (route === '/v1/chat/completions' || route === '/v1/completions')) {
+            if (!/^application\/json\b/i.test(req.headers['content-type'] || '')) throw httpError(415, 'Content-Type must be application/json');
+            return await handleCompletion(await readJson(req), res, route === '/v1/completions');
+        }
+        throw httpError(404, `no route for ${req.method} ${url.pathname}`);
+    } catch (err) {
+        if (err.status === 499) return res.destroy();
+        if (!err.status) console.error(err);
+        sendJson(res, err.status || 500, errorBody(err));
+    }
+});
+server.requestTimeout = 0; // long generations; the per-turn TIMEOUT_MS bounds them instead
+server.listen(PORT, '127.0.0.1', () => {
+    console.log(`zcode-api: http://127.0.0.1:${PORT}/api/v1 (models: ${MODELS.join(', ')}; agent mode ${AGENT ? 'on' : 'off'})`);
+});

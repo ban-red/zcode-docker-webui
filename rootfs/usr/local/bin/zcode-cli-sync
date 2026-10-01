@@ -1,0 +1,99 @@
+#!/usr/bin/env node
+// Lets ZCode's headless CLI (zcode-cli, and so the /api/v1 endpoint) use the desktop app's login.
+//
+// The desktop and the CLI share one encrypted credential store (/config/.zcode/v2/credentials.json).
+// After its Z.ai login the desktop caches the coding-plan API key there under
+//   account-provider:coding-plan:<providerId>:account:<user id>:api-key
+// which is exactly the entry the CLI reads. The CLI just also wants
+//   account-provider:<providerId>:identity = <user id>
+// to know which account is current; `zcode-cli login` writes it, the desktop doesn't. This script
+// writes that (non-secret) entry for every provider the desktop holds a key for. No network calls,
+// no new login, and no secret is printed or leaves the store. Idempotent; run as the desktop user.
+// Exit codes: 0 synced/already current, 2 desktop not logged in (or no model used yet), 1 error.
+//
+// It calls ZCode's own (unexported) store and key-name functions, located by the readable names the
+// bundle registers them under, so a ZCode update that renames them fails loudly here.
+'use strict';
+const fs = require('node:fs');
+const path = require('node:path');
+const Module = require('node:module');
+
+const BUNDLE = '/opt/ZCode/resources/glm/zcode.cjs';
+const BUILTIN_PROVIDERS = '/opt/ZCode/resources/config/provider/zcode-builtin.json';
+
+function loadInternals(names) {
+    let src = fs.readFileSync(BUNDLE, 'utf8').replace(/^#!.*\n/, '');
+    const find = (re, what) => {
+        const m = re.exec(src);
+        if (!m) throw new Error(`ZCode bundle layout changed: ${what} not found`);
+        return m;
+    };
+    // esbuild helpers: r(fn,"name") registers readable names, Y(()=>{...}) wraps each module's lazy init.
+    const r = find(/var ([\w$]+)=\(e,t\)=>[\w$]+\(e,"name",/, 'name helper')[1];
+    const Y = find(/var ([\w$]+)=\(e,t\)=>\(\)=>\(e&&\(t=e\(e=0\)\),t\)/, 'init helper')[1];
+    const esc = s => s.replace(/[$]/g, '\\$');
+    // Drop the top-level `main();` call so loading the bundle doesn't run the CLI.
+    const main = find(new RegExp(`${esc(r)}\\(([\\w$]+),"main"\\)`), 'main')[1];
+    const call = `;${main}();async function ${main}(`;
+    if (!src.includes(call)) throw new Error('ZCode bundle layout changed: main() call not found');
+    src = src.replace(call, `;async function ${main}(`);
+
+    const exportsSrc = [];
+    for (const [key, readable] of Object.entries(names)) {
+        const reg = find(new RegExp(`${esc(r)}\\(([\\w$]+),"${readable}"\\)`), readable);
+        // The lazy module initialiser (var X=Y(()=>{...})) that this registration sits in.
+        const before = src.lastIndexOf(`=${Y}(()=>{"use strict";`, reg.index);
+        const init = before > 0 && /([\w$]+)$/.exec(src.slice(Math.max(0, before - 64), before))?.[1];
+        if (!init) throw new Error(`ZCode bundle layout changed: initialiser of ${readable} not found`);
+        exportsSrc.push(`${key}:(${init}(),${reg[1]})`);
+    }
+    src += `\nmodule.exports={${exportsSrc.join(',')}};`;
+
+    const m = new Module(BUNDLE, null);
+    m.filename = BUNDLE;
+    m.paths = Module._nodeModulePaths(path.dirname(BUNDLE));
+    m._compile(src, BUNDLE);
+    return m.exports;
+}
+
+// Individual Z.ai coding-plan style providers ("account:zai-individual-coding-plan", ...).
+function zaiAccountProviders() {
+    const rules = JSON.parse(fs.readFileSync(BUILTIN_PROVIDERS, 'utf8')).config.providerConfigRules.providerRules;
+    return rules.filter(r => r.config?.access?.type === 'zhipu-account' && r.config.access.accountType === 'zai'
+        && r.config.access.mode !== 'team-coding-plan').map(r => r.providerId);
+}
+
+async function main() {
+    const z = loadInternals({
+        createStore: 'createSharedZCodeCredentialStore',
+        identityKey: 'standaloneAccountIdentityCredentialKey',
+        apiKeyKey: 'standaloneAccountProviderCredentialKey',
+    });
+    const store = z.createStore({ env: process.env });
+    let user;
+    try { user = JSON.parse((await store.load('oauth:zai:user_info')) || 'null'); } catch {}
+    const userId = String(user?.user_id ?? '').trim();
+    if (!userId) {
+        console.error('zcode-cli-sync: the desktop app has no Z.ai login (log in to ZCode, or run ./login.sh --cli)');
+        process.exit(2);
+    }
+    const synced = [], current = [];
+    for (const providerId of zaiAccountProviders()) {
+        const hasKey = Boolean((await store.load(z.apiKeyKey({ providerId, accountIdentity: userId })))?.trim());
+        if (!hasKey) continue;
+        const idKey = z.identityKey(providerId);
+        if ((await store.load(idKey))?.trim() === userId) { current.push(providerId); continue; }
+        await store.saveMany({ [idKey]: userId });
+        synced.push(providerId);
+    }
+    if (!synced.length && !current.length) {
+        console.error('zcode-cli-sync: the desktop is logged in but has no coding-plan key cached yet; send one message in ZCode first (or run ./login.sh --cli)');
+        process.exit(2);
+    }
+    console.log(`zcode-cli-sync: CLI uses the desktop's Z.ai login (${[...synced, ...current].join(', ')}${synced.length ? '' : '; already current'})`);
+}
+
+main().then(() => process.exit(0), err => {
+    console.error(`zcode-cli-sync: ${err?.message || err}`);
+    process.exit(1);
+});

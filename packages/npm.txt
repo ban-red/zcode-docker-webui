@@ -1,0 +1,3 @@
+# Global npm packages (npm install -g). One per line, name or name@version; edit and run ./run.sh.
+# node, npm, npx and corepack (pnpm/yarn) are always included - pick the Node major with NODE_VERSION in .env.
+bun               # the Bun runtime/package manager (ships its Linux binary via npm)

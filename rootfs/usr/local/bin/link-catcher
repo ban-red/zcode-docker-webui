@@ -1,0 +1,17 @@
+#!/bin/sh
+# Stand-in for xdg-open & co.: ZCode's "open in browser" (OAuth login) lands here.
+# The URL is saved for ./login.sh, which opens it in the Mac's browser.
+#   link-catcher --install   symlink over the usual URL openers (build time)
+OUT=/tmp/zcode-open-url
+
+if [ "$1" = --install ]; then
+    for b in xdg-open x-www-browser sensible-browser gnome-open; do
+        ln -sf /usr/local/bin/link-catcher "/usr/bin/$b"
+    done
+    exit 0
+fi
+
+url=${1:-}
+[ -n "$url" ] || exit 1
+printf '%s\n' "$url" > "$OUT.tmp" && mv "$OUT.tmp" "$OUT"
+printf '\n[link-catcher] URL captured (run ./login.sh on the Mac):\n\n%s\n\n' "$url"

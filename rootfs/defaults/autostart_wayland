@@ -1,0 +1,5 @@
+# No exec: the Selkies watchdog (RESTART_APP) tracks this sh process and relaunches
+# ZCode when it quits (e.g. Ctrl+W on the last window). Its relaunch has no
+# WAYLAND_DISPLAY, so name labwc's socket here.
+export WAYLAND_DISPLAY="${WAYLAND_DISPLAY:-wayland-0}"
+cd "${ZCODE_WORKDIR:-$HOME}" 2>/dev/null; zcode --start-maximized

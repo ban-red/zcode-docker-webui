@@ -1,0 +1,19 @@
+#!/bin/bash
+# Hand a zcode:// URL to the running ZCode (Electron single-instance handoff).
+# Re-runs the launcher as the same user with the same environment as the running
+# process, so DISPLAY / WAYLAND_DISPLAY / DBus / HOME all match without guessing.
+set -euo pipefail
+
+url=${1:?usage: zcode-callback 'zcode://zai-auth/callback?...'}
+# -i: the main process renames itself "ZCode"; its children stay "zcode".
+pid=$(pgrep -o -i -x zcode) || { echo "ZCode is not running." >&2; exit 1; }
+
+mapfile -d '' envs < "/proc/$pid/environ"
+uid=$(stat -c %u "/proc/$pid")
+gid=$(stat -c %g "/proc/$pid")
+
+cmd=(env -i "${envs[@]}" ZCODE_CDP=0 /usr/local/bin/zcode "$url")
+if [[ $(id -u) != "$uid" ]]; then
+    cmd=(setpriv --reuid="$uid" --regid="$gid" --init-groups "${cmd[@]}")
+fi
+exec "${cmd[@]}"

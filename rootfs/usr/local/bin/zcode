@@ -1,0 +1,25 @@
+#!/bin/sh
+# Launch ZCode with container-friendly Chromium flags. Extra flags: $ZCODE_FLAGS.
+#   --no-sandbox           the container is the sandbox; Chromium's needs privileges we don't grant
+#   --password-store=basic skip the keyring probe (no gnome-keyring => multi-second stall)
+#   --disable-gpu          no GPU in OrbStack/XQuartz; skip GL probing and GPU-process crash loops
+#   --force-prefers-reduced-motion  (ZCODE_REDUCED_MOTION=1, default) fewer animations = fewer frames to render and stream
+set -- --no-sandbox --password-store=basic --disable-gpu $ZCODE_FLAGS "$@"
+[ "${ZCODE_REDUCED_MOTION:-1}" = 1 ] && set -- --force-prefers-reduced-motion "$@"
+
+if [ -n "$WAYLAND_DISPLAY" ]; then
+    set -- --ozone-platform=wayland "$@"
+else
+    set -- --ozone-platform=x11 "$@"
+    # Remote X server (XQuartz): MIT-SHM can't cross the VM boundary, and trying gives blank windows.
+    case "$DISPLAY" in :*) ;; *) set -- --no-xshm "$@" ;; esac
+fi
+
+# Chrome DevTools Protocol for automation (Playwright, chrome-devtools-mcp, ...).
+# Chromium only binds loopback, so zcode-cdp-proxy re-exposes it on :9223.
+if [ "${ZCODE_CDP:-0}" = 1 ]; then
+    set -- --remote-debugging-port=9222 "$@"
+    zcode-cdp-proxy &
+fi
+
+exec /opt/ZCode/zcode "$@"

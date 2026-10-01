@@ -1,0 +1,10 @@
+# Ubuntu packages available to the ZCode agent. One per line; edit and run ./run.sh.
+# Search names: https://packages.ubuntu.com  (web mode = Ubuntu 26.04, x11 mode = 24.04)
+git
+ripgrep
+jq
+curl
+less
+unzip
+python3
+build-essential   # compilers for native npm modules (node-gyp)

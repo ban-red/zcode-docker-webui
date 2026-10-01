@@ -1,0 +1,9 @@
+#!/bin/sh
+# The base image copies /defaults/autostart* into /config only when missing, so an
+# existing config volume keeps a stale launcher. Refresh it on every boot
+# (cp onto the existing file keeps the root:abc 550 lock RESTART_APP puts on it).
+for pair in autostart_wayland:labwc autostart:openbox; do
+    dest="/config/.config/${pair#*:}/autostart"
+    [ -f "$dest" ] && cp "/defaults/${pair%%:*}" "$dest"
+done
+exit 0

@@ -1,0 +1,11 @@
+#!/bin/sh
+# ZCode's bundled headless CLI (the engine behind the desktop app's agent).
+#   zcode-cli login --no-browser   sign the CLI in (once; ./login.sh --cli does this from the Mac)
+#   zcode-cli -p "prompt"          one-shot prompt; --output-format stream-json for NDJSON events
+#   zcode-cli --help
+# Always runs as the desktop's user with HOME=/config, so it shares ZCode's login volume:
+# `docker exec zcode zcode-cli ...` would otherwise run as root with HOME=/root.
+if [ "$(id -u)" = 0 ] && [ "$HOME" != /config ] && id abc >/dev/null 2>&1; then
+    exec setpriv --reuid=abc --regid=abc --init-groups env HOME=/config "$0" "$@"
+fi
+exec node /opt/ZCode/resources/glm/zcode.cjs "$@"

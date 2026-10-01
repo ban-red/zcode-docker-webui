@@ -1,0 +1,4 @@
+# Mounted repos come from the Mac, so their owner never matches the container user;
+# without this git refuses them as "dubious ownership".
+[safe]
+	directory = *
