@@ -3,13 +3,14 @@
 #   apt.txt   Ubuntu packages        (one per line, # comments)
 #   npm.txt   global npm packages    (one per line, # comments; name@version ok)
 #   setup.sh  anything else, run as root with bash (curl installers, symlinks, ...)
+# A git-ignored packages/local/ with the same three files adds to these (personal extras).
 set -euo pipefail
 dir=${1:-/tmp/packages}
 
 list() { [[ -f $1 ]] || return 0; sed -e 's/#.*//' -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' "$1" | grep -v '^$' || true; }
 
-mapfile -t apt < <(list "$dir/apt.txt")
-mapfile -t npm < <(list "$dir/npm.txt")
+mapfile -t apt < <(list "$dir/apt.txt"; list "$dir/local/apt.txt")
+mapfile -t npm < <(list "$dir/npm.txt"; list "$dir/local/npm.txt")
 
 if (( ${#apt[@]} )); then
     echo "install-packages: apt: ${apt[*]}"
@@ -22,7 +23,9 @@ if (( ${#npm[@]} )); then
     npm install -g --no-fund --no-audit "${npm[@]}"
 fi
 
-if [[ -s $dir/setup.sh ]]; then
-    echo "install-packages: running setup.sh"
-    bash -euo pipefail "$dir/setup.sh"
-fi
+for script in "$dir/setup.sh" "$dir/local/setup.sh"; do
+    if [[ -s $script ]]; then
+        echo "install-packages: running ${script#"$dir"/}"
+        bash -euo pipefail "$script"
+    fi
+done

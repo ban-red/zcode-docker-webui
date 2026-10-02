@@ -99,6 +99,7 @@ The agent runs commands inside the container, so your tools need to be there too
 | `packages/npm.txt` | Global npm packages (`name` or `name@version`) | `bun` |
 | `packages/setup.sh` | Anything else, run as root at build time | empty, with examples for uv and deno |
 
+- **Personal extras:** put your own packages in `packages/local/` (`apt.txt`, `npm.txt`, `setup.sh`, same formats). They are added on top of the defaults, and the folder is git-ignored, so your changes never end up in commits or pull requests. Example: `mkdir -p packages/local && echo ffmpeg >> packages/local/apt.txt`.
 - **Always present:** `node`, `npm`, `npx` and `corepack`, so `pnpm` and `yarn` download at the version your `package.json` pins. Set the Node major with `NODE_VERSION` (default `24`).
 - **Git uses your identity:** your Mac's `user.name` and `user.email` are passed in. Mounted repos are trusted, so git doesn't stop with "dubious ownership" errors.
 - **`node_modules` holds binaries for one OS.** Packages like esbuild, swc, sharp and rollup ship native binaries. If the agent runs `npm install` in the container, your Mac's `npm run dev` fails until you reinstall on the Mac, and the reverse is also true. Pick one side per project for installs and builds.
