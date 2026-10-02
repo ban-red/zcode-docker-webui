@@ -3,3 +3,5 @@
 compose.override.yaml
 *.md
 docs
+container.env
+compose.folders.yaml

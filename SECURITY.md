@@ -126,7 +126,7 @@ Selkies syncs the clipboard both ways while the tab has focus. Whatever you copy
 
 ### 11. Minor
 - **Selkies extras are reachable:** the apps panel (`selkies-proot`), print spooling, audio and virtual gamepads. With finding 1 in place, the apps panel also lets whoever holds the WebSocket install software. Harden with the Selkies hardening variables if you care; see the *Security and Hardening* page in the LinuxServer docs.
-- **Your git name and email are passed into the container** as `GIT_*` variables so commits are attributed to you. They're visible to the agent and written to `compose.override.yaml`, which is git-ignored.
+- **Your git name and email are passed into the container** as `GIT_*` variables so commits are attributed to you. They're visible to the agent and written to `compose.folders.yaml`, which is git-ignored.
 - **`run.sh` writes folder paths into YAML.** It rejects `"`, `$` and `\`. A folder name containing a newline could still break the generated file. That would be self-inflicted, not exploitable from the container.
 
 ---
@@ -141,7 +141,7 @@ Everything above assumes OrbStack on macOS. With `ZCODE_RUNTIME=docker`, `compos
 - **The container isn't privileged:** no added capabilities, no Docker socket, and the bundled dockerd isn't started.
 - **`zcode-callback`** copies the environment of the running ZCode process, which the agent controls. It drops privileges with `setpriv` **before** applying that environment, so variables like `LD_PRELOAD` can't run as root.
 - **The callback URL in `login.sh`** has to start with `zcode://`, and it's passed to `docker exec` as a single argument, with no shell interpolation.
-- **Settings and credentials live in a named volume**, not in the repo. `.env` and `compose.override.yaml` are git-ignored and docker-ignored.
+- **Settings and credentials live in a named volume**, not in the repo. `.env`, `compose.folders.yaml` and `compose.override.yaml` are git-ignored and docker-ignored.
 
 ## Suggested next steps (not yet applied)
 

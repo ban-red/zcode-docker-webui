@@ -80,13 +80,15 @@ Pass one or more folders. Each is mounted at the **same path** inside the contai
 ./run.sh ~/code/myapp ~/code/shared-lib  # several
 ./run.sh .                               # the current folder
 ./run.sh                                 # the same folders as last time
+./run.sh --add ~/code/other-lib          # keep the current folders and add this one
 ./run.sh --none                          # no folders
 ```
 
-- **To add or remove a folder,** rerun with the full new list. The container is recreated in a few seconds.
+- **To add a folder,** use `--add`; the current folders stay and the first one remains the working directory. **To remove one,** rerun with the full new list. The container is recreated in a few seconds.
 - **Settings, login, chat history and the npm cache stay put** in the `/config` volume, separate from your projects.
 - **Relative paths** resolve from the directory you ran the command in.
-- **Folder list:** `run.sh` records it in `compose.override.yaml`, a generated, git-ignored file, and prints it on every run.
+- **Folder list:** `run.sh` records it in `compose.folders.yaml`, a generated, git-ignored file, and prints it on every run.
+- **Your own compose changes** (extra mounts, ports, env, ...) go in `compose.override.yaml`. It's git-ignored, merged last, and `run.sh` never rewrites it. Example: `services: { zcode: { ports: ["8080:8080"] } }`.
 - **Broad folders are refused.** `/`, `/Users`, `/Volumes` and your home folder are rejected, because they would hand the agent `~/.ssh`, `~/.aws` and so on. Mount specific projects, or a parent folder like `~/code`.
 
 ### Toolchain
@@ -253,6 +255,16 @@ cp .env.example .env
 | `ZCODE_FLAGS` | empty | Extra Electron/Chromium flags |
 
 Stream settings are only starting values. The Selkies sidebar can still change them during a session.
+
+### Your own environment variables
+
+`.env` only configures this project. To give the container's shell and tools variables of your own (API keys, `HTTP_PROXY`, ...), put plain `KEY=value` lines in `container.env`, then run `./run.sh`:
+
+```sh
+echo 'MY_TOKEN=abc123' >> container.env
+```
+
+The file is optional and git-ignored, so secrets stay out of commits and the build context. Changing it recreates the container, and the variables are visible to the agent, so keep out anything you wouldn't hand it. The `ZCODE_*` settings above win if a name appears in both.
 
 ## Troubleshooting
 

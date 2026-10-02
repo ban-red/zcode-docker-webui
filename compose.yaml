@@ -12,7 +12,13 @@ x-common: &common
   cpus: ${ZCODE_CPUS:-4}   # hard ceiling; the stream drops frames instead of eating the Mac
 
 # Every ZCODE_* knob below can be set in .env (see .env.example); ./run.sh applies changes.
-# Project folders are mounted by compose.override.yaml, which ./run.sh <dir>... generates.
+# Project folders are mounted by compose.folders.yaml, which ./run.sh <dir>... generates.
+# Your own compose tweaks (extra mounts, ports, ...) go in compose.override.yaml: git-ignored, never rewritten.
+# Your own container env vars (API keys, proxies, ...) go in container.env (git-ignored, optional).
+
+x-user-env: &user-env
+  - path: container.env
+    required: false
 
 services:
   zcode:
@@ -20,6 +26,7 @@ services:
     build: { context: ., target: web, args: *build-args }
     image: zcode:web
     container_name: zcode
+    env_file: *user-env
     volumes:
       - zcode-config:/config
     environment:
@@ -61,6 +68,7 @@ services:
     build: { context: ., target: x11, args: *build-args }
     image: zcode:x11
     container_name: zcode
+    env_file: *user-env
     volumes:
       - zcode-x11-config:/config
     environment:
